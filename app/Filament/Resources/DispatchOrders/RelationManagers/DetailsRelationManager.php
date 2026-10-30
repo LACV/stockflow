@@ -8,6 +8,7 @@ use App\Models\Article;
 use App\Models\Destination;
 use App\Models\Employee;
 use App\Models\MonthlyClosure;
+use App\Services\MovementService;
 use Carbon\Carbon;
 use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
@@ -20,6 +21,7 @@ use Filament\Schemas\Schema;
 use Filament\Tables;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
+use Illuminate\Validation\ValidationException;
 
 class DetailsRelationManager extends RelationManager
 {
@@ -81,22 +83,29 @@ class DetailsRelationManager extends RelationManager
     {
         $transaction = $this->getOwnerRecord();
 
-        if (! $transaction || $transaction->status !== 'inactive') {
-            return [];
+        $mine = [];
+
+        if ($transaction && $transaction->status === 'inactive') {
+            $excludeId = $excludeMountedDetail
+                ? $this->getMountedAction()?->getRecord()?->getKey()
+                : null;
+
+            $mine = $transaction->details()
+                ->with('adjustments')
+                ->get()
+                ->reject(fn ($detail) => $excludeId !== null && (int) $detail->getKey() === (int) $excludeId)
+                ->reject(fn ($detail) => filled($detail->adjusts_detail_id))
+                ->groupBy('article_id')
+                ->map(fn ($rows) => $rows->sum(fn ($detail) => (float) $detail->quantity + (float) $detail->adjustments->sum('quantity')))
+                ->toArray();
         }
 
-        $excludeId = $excludeMountedDetail
-            ? $this->getMountedAction()?->getRecord()?->getKey()
-            : null;
+        // Lo que ya piden otros despachos en borrador (reabiertos) tambien esta comprometido.
+        foreach (app(MovementService::class)->reservedByOtherDrafts($transaction?->id) as $articleId => $qty) {
+            $mine[$articleId] = (float) ($mine[$articleId] ?? 0) + $qty;
+        }
 
-        return $transaction->details()
-            ->with('adjustments')
-            ->get()
-            ->reject(fn ($detail) => $excludeId !== null && (int) $detail->getKey() === (int) $excludeId)
-            ->reject(fn ($detail) => filled($detail->adjusts_detail_id))
-            ->groupBy('article_id')
-            ->map(fn ($rows) => $rows->sum(fn ($detail) => (float) $detail->quantity + (float) $detail->adjustments->sum('quantity')))
-            ->toArray();
+        return $mine;
     }
 
     protected function projectedAvailable(int $articleId): float
@@ -299,17 +308,8 @@ class DetailsRelationManager extends RelationManager
                 CreateAction::make()
                     ->label('Agregar retiro')
                     ->icon('heroicon-o-plus')
-                    ->disabled(fn () => $this->isMonthClosed() || ($this->isTransactionActive() && ! $this->canEditInReopenedMonth()))
+                    ->disabled(fn () => $this->isMonthClosed())
                     ->beforeFormFilled(function (CreateAction $action) {
-                        if ($this->isTransactionActive() && ! $this->canEditInReopenedMonth()) {
-                            Notification::make()
-                                ->title('Factura ya guardada')
-                                ->body('Esta factura ya fue guardada. No se pueden agregar artículos.')
-                                ->warning()
-                                ->persistent()
-                                ->send();
-                            $action->halt();
-                        }
                         if ($this->isMonthClosed()) {
                             $this->sendClosedMonthNotification();
                             $action->halt();
@@ -319,6 +319,19 @@ class DetailsRelationManager extends RelationManager
                         $data['total_cost'] = ($data['quantity'] ?? 0) * ($data['unit_cost'] ?? 0);
 
                         return $data;
+                    })
+                    ->using(function (array $data, CreateAction $action) {
+                        try {
+                            return app(MovementService::class)->addExitLine($this->getOwnerRecord(), $data);
+                        } catch (ValidationException $e) {
+                            Notification::make()
+                                ->title('No se puede agregar el retiro')
+                                ->body(collect($e->errors())->flatten()->first())
+                                ->danger()
+                                ->persistent()
+                                ->send();
+                            $action->halt();
+                        }
                     })
                     ->after(fn ($livewire) => $livewire->dispatch('dispatch-detail-changed')),
             ])

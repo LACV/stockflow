@@ -27,7 +27,8 @@ class CreateDispatchOrder extends CreateRecord
     protected function mutateFormDataBeforeCreate(array $data): array
     {
 
-        $data['status'] = 'inactive';
+        // Las salidas descuentan stock al agregar cada linea: el despacho nace activo.
+        $data['status'] = 'active';
 
         return $data;
     }

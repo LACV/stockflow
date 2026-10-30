@@ -77,8 +77,8 @@ trait ReopensTransaction
             ->persistent()
             ->send();
 
-        if (method_exists($this, 'refreshFormData')) {
-            $this->refreshFormData(['status']);
-        }
+        // Recargar la pantalla: los botones del encabezado y la tabla de lineas dependen
+        // del estado y se quedaban con el valor anterior hasta refrescar a mano.
+        $this->redirect($this->getResource()::getUrl('edit', ['record' => $this->record]));
     }
 }

@@ -12,6 +12,7 @@ use Carbon\Carbon;
 use Filament\Actions\Action;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class MovementService
 {
@@ -245,6 +246,91 @@ class MovementService
         });
 
         return ['ok' => true, 'title' => 'Registro guardado', 'body' => 'El registro fue guardado exitosamente. Ya no es posible editarlo.'];
+    }
+
+    /**
+     * Cantidad que otros despachos en borrador ya piden por articulo.
+     *
+     * Un borrador no resta stock hasta guardarse, asi que sin esto dos borradores
+     * pueden prometer las mismas unidades. Solo cuentan borradores de salida de
+     * meses todavia abiertos: los de un mes cerrado no deben bloquear stock.
+     *
+     * @return array<int, float> article_id => cantidad reservada
+     */
+    public function reservedByOtherDrafts(?int $excludeTransactionId = null): array
+    {
+        return DB::table('inventory_transaction_details as d')
+            ->join('inventory_transactions as t', 't.id', '=', 'd.inventory_transaction_id')
+            ->where('t.type', 'exit')
+            ->where('t.status', 'inactive')
+            ->when($excludeTransactionId, fn ($q) => $q->where('t.id', '!=', $excludeTransactionId))
+            ->whereNotExists(function ($q) {
+                $q->select(DB::raw(1))
+                    ->from('monthly_closures as c')
+                    ->where('c.is_closed', true)
+                    ->whereColumn('c.month', 't.month')
+                    ->whereColumn('c.year', 't.year');
+            })
+            ->groupBy('d.article_id')
+            ->selectRaw('d.article_id, sum(d.quantity) as qty')
+            ->pluck('qty', 'article_id')
+            ->map(fn ($qty) => (float) $qty)
+            ->all();
+    }
+
+    /**
+     * Agrega una linea de salida a un despacho validando el stock de forma atomica.
+     *
+     * Bloquea la fila del articulo mientras valida y crea la linea, para que dos
+     * personas no agoten el mismo stock a la vez. En un despacho activo el observer
+     * descuenta el stock al crear la linea; en un borrador solo se valida.
+     * Disponible = stock vivo - lo que piden otros borradores - lo ya pedido en este
+     * borrador (si lo es).
+     *
+     * @throws ValidationException
+     */
+    public function addExitLine(InventoryTransaction $transaction, array $data): InventoryTransactionDetail
+    {
+        $date = Carbon::parse($transaction->transaction_date);
+        $closure = MonthlyClosure::where('month', $date->month)->where('year', $date->year)->first();
+        $reopened = $closure && $closure->isReopened() && auth()->user()?->can('Reopen:MonthlyClosure');
+
+        if ($closure && $closure->is_closed && ! $reopened) {
+            throw ValidationException::withMessages([
+                'quantity' => "El mes {$date->month}/{$date->year} ya está cerrado: no se pueden agregar retiros.",
+            ]);
+        }
+
+        return DB::transaction(function () use ($transaction, $data) {
+            $article = Article::whereKey($data['article_id'])->lockForUpdate()->firstOrFail();
+            $qty = (float) $data['quantity'];
+
+            $reserved = $this->reservedByOtherDrafts($transaction->id)[$article->id] ?? 0.0;
+            $ownPending = $transaction->status === 'inactive'
+                ? (float) $transaction->details()->where('article_id', $article->id)->sum('quantity')
+                : 0.0;
+            $available = (float) $article->stock_quantity - $reserved - $ownPending;
+
+            if ($qty > $available + 1e-9) {
+                $fmt = fn (float $n) => rtrim(rtrim(number_format($n, 4, '.', ''), '0'), '.') ?: '0';
+                $detail = 'disponible '.$fmt(max(0, $available)).' und';
+
+                if ($reserved > 0) {
+                    $detail .= ', '.$fmt($reserved).' und ya las piden otros despachos en borrador';
+                }
+
+                throw ValidationException::withMessages([
+                    'quantity' => "Stock insuficiente: {$detail}; se requieren ".$fmt($qty).' und.',
+                ]);
+            }
+
+            $unit = (float) ($data['unit_cost'] ?? $article->current_average_cost);
+
+            return $transaction->details()->create($data + [
+                'unit_cost' => $unit,
+                'total_cost' => $qty * $unit,
+            ]);
+        });
     }
 
     public function syncTransactionStatus(?InventoryTransactionDetail $detail): void
