@@ -218,4 +218,35 @@ class EntryDeletionTest extends TestCase
         $this->assertSame(1, ArticlePrice::where('transaction_id', $exit->id)->where('article_id', $b->id)->count(), 'el precio de la salida del otro articulo queda');
         $this->assertSame(1, ArticlePrice::where('article_id', $b->id)->where('source', 'ENTRY')->count());
     }
+
+    public function test_kept_exit_is_repriced_to_the_ppp_without_the_deleted_entry(): void
+    {
+        $a = $this->article('A');
+        $this->saved('entry', '2026-10-02', [[$a, 10, 100]]);
+        $second = $this->saved('entry', '2026-10-03', [[$a, 5, 200]]);
+        $exit = $this->saved('exit', '2026-10-05', [[$a, 3, 0]]);
+        $line = $exit->details()->first();
+        $this->assertEqualsWithDelta(133.3333, (float) $line->unit_cost, 0.001, 'PPP con ambas entradas');
+
+        $this->service()->deleteEntry($second);
+
+        $line = $line->fresh();
+        $this->assertEquals(100.0, (float) $line->unit_cost);
+        $this->assertEquals(300.0, (float) $line->total_cost);
+        $this->assertEquals(100.0, (float) ArticlePrice::where('transaction_id', $exit->id)->where('article_id', $a->id)->value('price'));
+    }
+
+    public function test_exit_unaffected_by_the_deleted_entry_keeps_its_stored_cost(): void
+    {
+        $a = $this->article('A');
+        $b = $this->article('B');
+        $this->saved('entry', '2026-10-01', [[$b, 4, 50]]);
+        $entry = $this->saved('entry', '2026-10-02', [[$a, 5, 100]]);
+        $exit = $this->saved('exit', '2026-10-05', [[$b, 2, 0]]);
+        $stored = (float) $exit->details()->first()->unit_cost;
+
+        $this->service()->deleteEntry($entry);
+
+        $this->assertEquals($stored, (float) $exit->details()->first()->fresh()->unit_cost);
+    }
 }

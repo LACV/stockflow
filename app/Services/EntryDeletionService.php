@@ -22,7 +22,7 @@ use Illuminate\Support\Facades\Log;
 class EntryDeletionService
 {
     /**
-     * @return array{blocked: ?string, requiresWholeEntry: bool, exits: Collection, simulation: array}
+     * @return array{blocked: ?string, requiresWholeEntry: bool, exits: Collection, reprice: array, simulation: array}
      */
     public function planEntryDeletion(InventoryTransaction $entry): array
     {
@@ -30,7 +30,7 @@ class EntryDeletionService
     }
 
     /**
-     * @return array{blocked: ?string, requiresWholeEntry: bool, exits: Collection, simulation: array}
+     * @return array{blocked: ?string, requiresWholeEntry: bool, exits: Collection, reprice: array, simulation: array}
      */
     public function planDetailDeletion(InventoryTransactionDetail $detail): array
     {
@@ -41,6 +41,7 @@ class EntryDeletionService
                 'blocked' => 'Es el único producto de la entrada: debe eliminar la entrada completa.',
                 'requiresWholeEntry' => true,
                 'exits' => collect(),
+                'reprice' => [],
                 'simulation' => [],
             ];
         }
@@ -110,6 +111,19 @@ class EntryDeletionService
 
             $deleteEntryPart();
 
+            foreach ($plan['reprice'] as $r) {
+                DB::table('inventory_transaction_details')->where('id', $r['detail_id'])->update([
+                    'unit_cost' => $r['unit_cost'],
+                    'total_cost' => $r['total_cost'],
+                ]);
+
+                $articleId = DB::table('inventory_transaction_details')->where('id', $r['detail_id'])->value('article_id');
+                DB::table('article_prices')
+                    ->where('transaction_id', $r['transaction_id'])
+                    ->where('article_id', $articleId)
+                    ->update(['price' => $r['unit_cost']]);
+            }
+
             foreach ($plan['simulation'] as $articleId => $state) {
                 DB::table('articles')->where('id', $articleId)->update([
                     'stock_quantity' => round($state['stock'], 4),
@@ -131,7 +145,7 @@ class EntryDeletionService
 
     private function plan(InventoryTransaction $entry, Collection $removed): array
     {
-        $result = ['blocked' => null, 'requiresWholeEntry' => false, 'exits' => collect(), 'simulation' => []];
+        $result = ['blocked' => null, 'requiresWholeEntry' => false, 'exits' => collect(), 'reprice' => [], 'simulation' => []];
 
         if (strtolower($entry->type) !== 'entry') {
             $result['blocked'] = 'La transacción no es una entrada.';
@@ -161,67 +175,113 @@ class EntryDeletionService
         $cutoff = $this->lastClosedCutoff();
 
         foreach ($removed->pluck('article_id')->unique() as $articleId) {
-            $state = $this->startState((int) $articleId);
-
             $movements = DB::table('inventory_transaction_details as d')
                 ->join('inventory_transactions as t', 't.id', '=', 'd.inventory_transaction_id')
                 ->where('d.article_id', $articleId)
                 ->where('t.status', 'active')
                 ->when($cutoff, fn ($q) => $q->where('t.transaction_date', '>', $cutoff))
-                ->whereNotIn('d.id', $removedIds)
                 ->orderBy('d.created_at')
                 ->orderBy('d.id')
                 ->select('d.id', 'd.inventory_transaction_id', 'd.quantity', 'd.unit_cost', 'd.total_cost', 't.type', 't.transaction_date')
                 ->get();
 
-            $stock = $state['stock'];
-            $avg = $state['avg'];
+            $start = $this->startState((int) $articleId);
+            $base = $this->replay($movements, $start, []);
+            $after = $this->replay($movements, $start, $removedIds);
 
-            foreach ($movements as $m) {
-                $type = strtoupper($m->type);
-                $qty = (float) $m->quantity;
-                $cost = (float) $m->unit_cost;
+            if ($after['blockedAdjustment']) {
+                $result['blocked'] = 'Un ajuste negativo dependería de esta entrada: corríjalo primero.';
 
-                if ($type === 'ENTRY' || ($type === 'ADJUSTMENT' && $qty > 0)) {
-                    $newStock = $stock + $qty;
-                    $avg = $newStock > 0 ? (($stock * $avg) + ($qty * $cost)) / $newStock : $cost;
-                    $stock = $newStock;
+                return $result;
+            }
 
-                    continue;
-                }
+            $article = DB::table('articles')->where('id', $articleId)->first();
 
-                $need = abs($qty);
+            foreach ($after['exits'] as $detailId => $exit) {
+                $m = $exit['movement'];
 
-                if ($need > $stock + 1e-9) {
-                    if ($type !== 'EXIT') {
-                        $result['blocked'] = 'Un ajuste negativo dependería de esta entrada: corríjalo primero.';
-
-                        return $result;
-                    }
-
-                    $article = DB::table('articles')->where('id', $articleId)->first();
+                if (! $exit['covered']) {
                     $result['exits']->push([
-                        'detail_id' => (int) $m->id,
+                        'detail_id' => (int) $detailId,
                         'transaction_id' => (int) $m->inventory_transaction_id,
                         'date' => Carbon::parse($m->transaction_date)->toDateString(),
                         'article' => trim(($article->code ?? '').' '.($article->name ?? '')),
-                        'quantity' => $need,
+                        'quantity' => abs((float) $m->quantity),
                         'value' => (float) $m->total_cost,
                     ]);
 
                     continue;
                 }
 
+                // Salida que se conserva: su costo guardado debe seguir al PPP sin lo borrado.
+                $before = $base['exits'][$detailId]['unit'] ?? $exit['unit'];
+                if (abs($exit['unit'] - $before) > 0.0001) {
+                    $result['reprice'][] = [
+                        'detail_id' => (int) $detailId,
+                        'transaction_id' => (int) $m->inventory_transaction_id,
+                        'unit_cost' => $exit['unit'],
+                        'total_cost' => abs((float) $m->quantity) * $exit['unit'],
+                    ];
+                }
+            }
+
+            $result['simulation'][(int) $articleId] = ['stock' => max(0, $after['stock']), 'avg' => abs($after['avg'])];
+        }
+
+        return $result;
+    }
+
+    /**
+     * Repasa los movimientos activos del articulo sin las lineas excluidas.
+     *
+     * @return array{stock: float, avg: float, blockedAdjustment: bool, exits: array<int, array{covered: bool, unit: float, movement: object}>}
+     */
+    private function replay(Collection $movements, array $start, array $excludedIds): array
+    {
+        $stock = $start['stock'];
+        $avg = $start['avg'];
+        $exits = [];
+        $blockedAdjustment = false;
+
+        foreach ($movements as $m) {
+            if (in_array($m->id, $excludedIds, true) || in_array((int) $m->id, $excludedIds, true)) {
+                continue;
+            }
+
+            $type = strtoupper($m->type);
+            $qty = (float) $m->quantity;
+            $cost = (float) $m->unit_cost;
+
+            if ($type === 'ENTRY' || ($type === 'ADJUSTMENT' && $qty > 0)) {
+                $newStock = $stock + $qty;
+                $avg = $newStock > 0 ? (($stock * $avg) + ($qty * $cost)) / $newStock : $cost;
+                $stock = $newStock;
+
+                continue;
+            }
+
+            $need = abs($qty);
+            $covered = $need <= $stock + 1e-9;
+
+            if (! $covered && $type !== 'EXIT') {
+                $blockedAdjustment = true;
+
+                continue;
+            }
+
+            if ($type === 'EXIT') {
+                $exits[(int) $m->id] = ['covered' => $covered, 'unit' => $avg, 'movement' => $m];
+            }
+
+            if ($covered) {
                 $stock -= $need;
                 if ($stock <= 0) {
                     $avg = 0;
                 }
             }
-
-            $result['simulation'][(int) $articleId] = ['stock' => max(0, $stock), 'avg' => abs($avg)];
         }
 
-        return $result;
+        return ['stock' => $stock, 'avg' => $avg, 'blockedAdjustment' => $blockedAdjustment, 'exits' => $exits];
     }
 
     private function isMonthClosed($date): bool
