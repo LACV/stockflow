@@ -147,9 +147,12 @@ class MovementService
     /**
      * Pasa un borrador a activo aplicando su efecto en stock y costo.
      *
+     * $skipStockValidation: solo para regularizar salidas que ya ocurrieron fisicamente
+     * (el stock queda en 0, no negativo, y el PPP no cambia: una salida no lo modifica).
+     *
      * @return array{ok: bool, title: string, body: string}
      */
-    public function finalizeTransaction(InventoryTransaction $transaction): array
+    public function finalizeTransaction(InventoryTransaction $transaction, bool $skipStockValidation = false): array
     {
         if ($transaction->status !== 'inactive') {
             return ['ok' => false, 'title' => 'Ya guardado', 'body' => 'Este registro ya no es un borrador.'];
@@ -177,7 +180,7 @@ class MovementService
 
         $type = strtoupper($transaction->type);
 
-        if (! $isReopened && in_array($type, ['EXIT', 'ADJUSTMENT'], true)) {
+        if (! $isReopened && ! $skipStockValidation && in_array($type, ['EXIT', 'ADJUSTMENT'], true)) {
             $insuficientes = $this->validarStockSuficiente($details, $type);
 
             if (! empty($insuficientes)) {
