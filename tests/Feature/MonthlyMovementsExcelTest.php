@@ -470,4 +470,46 @@ class MonthlyMovementsExcelTest extends TestCase
         $this->assertEquals(24000.0, (float) $salidas[0][4]);
         $this->assertEquals(0.0, (float) $salidas[1][4], 'Mes cerrado ya entregado: no puede cambiar');
     }
+
+    private function negativeAdjustmentScenario(): Article
+    {
+        $type = Type::create(['name' => 'REPUESTOS']);
+        $article = Article::create(['name' => 'ACOPLE', 'code' => 'AC-1', 'type_id' => $type->id, 'stock_quantity' => 0, 'current_average_cost' => 0, 'is_active' => true]);
+
+        $this->addDetail($this->makeTransaction('entry', '2026-10-02'), $article, 10, 100);
+        $this->addDetail($this->makeTransaction('adjustment', '2026-10-05'), $article, -2, 100);
+
+        return $article;
+    }
+
+    public function test_negative_adjustment_in_an_open_month_shows_as_a_positive_exit_without_touching_ppp(): void
+    {
+        $this->negativeAdjustmentScenario();
+
+        $data = app(MonthlyMovementsExcelService::class)->previewArrays(10, 2026);
+
+        $salida = collect($data['salidas'])->first(fn ($r) => ($r[0] ?? null) === 'AC-1');
+        $this->assertEquals(2.0, (float) $salida[2]);
+        $this->assertEquals(200.0, (float) $salida[4]);
+
+        $mov = collect($data['movimientos'])->first(fn ($r) => ($r[0] ?? null) === 'AC-1');
+        $this->assertEquals(2.0, (float) $mov[8], 'cantidad salida');
+        $this->assertEquals(200.0, (float) $mov[10], 'valor salida');
+        $this->assertEquals(8.0, (float) $mov[11], 'cantidad restante');
+        $this->assertEquals(100.0, (float) $mov[12], 'PPP final no cambia');
+        $this->assertEquals(800.0, (float) $mov[13], 'valor final');
+        $this->assertEquals((float) $mov[4] + (float) $mov[7] - (float) $mov[10], (float) $mov[13], 'inicial + compras - salidas = final');
+    }
+
+    public function test_negative_adjustment_in_a_closed_month_keeps_its_original_output(): void
+    {
+        $this->negativeAdjustmentScenario();
+        $this->seedClosure(10, 2026, true, []);
+
+        $data = app(MonthlyMovementsExcelService::class)->previewArrays(10, 2026);
+
+        $salida = collect($data['salidas'])->first(fn ($r) => ($r[0] ?? null) === 'AC-1');
+        $this->assertEquals(-2.0, (float) $salida[2], 'mes cerrado ya entregado: no cambia');
+        $this->assertEquals(-200.0, (float) $salida[4]);
+    }
 }

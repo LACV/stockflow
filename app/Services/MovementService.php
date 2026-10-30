@@ -333,6 +333,18 @@ class MovementService
         });
     }
 
+    /**
+     * Cantidad neta que salio de una linea de despacho tras sus ajustes.
+     *
+     * Los ajustes se expresan en terminos de stock (positivo = devuelve unidades,
+     * negativo = quita mas), asi que la salida neta es la cantidad menos el ajuste.
+     * Es solo de presentacion: no toca stock ni PPP.
+     */
+    public function netExitQuantity(float $quantity, float $adjustmentsStockSum): float
+    {
+        return $quantity - $adjustmentsStockSum;
+    }
+
     public function syncTransactionStatus(?InventoryTransactionDetail $detail): void
     {
         if (! $detail) {

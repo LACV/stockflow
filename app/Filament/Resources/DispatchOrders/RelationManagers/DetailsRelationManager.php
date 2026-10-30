@@ -90,13 +90,14 @@ class DetailsRelationManager extends RelationManager
                 ? $this->getMountedAction()?->getRecord()?->getKey()
                 : null;
 
+            // Al guardar solo se descuenta la cantidad de la linea: el efecto de sus
+            // ajustes ya esta en el stock vivo, asi que no se suma aqui.
             $mine = $transaction->details()
-                ->with('adjustments')
                 ->get()
                 ->reject(fn ($detail) => $excludeId !== null && (int) $detail->getKey() === (int) $excludeId)
                 ->reject(fn ($detail) => filled($detail->adjusts_detail_id))
                 ->groupBy('article_id')
-                ->map(fn ($rows) => $rows->sum(fn ($detail) => (float) $detail->quantity + (float) $detail->adjustments->sum('quantity')))
+                ->map(fn ($rows) => $rows->sum(fn ($detail) => (float) $detail->quantity))
                 ->toArray();
         }
 
@@ -242,7 +243,7 @@ class DetailsRelationManager extends RelationManager
                     ->label('Cant. Efectiva')
                     ->getStateUsing(function ($record) {
                         $adjustments = $record->adjustments()->sum('quantity');
-                        $effective = (float) $record->quantity + (float) $adjustments;
+                        $effective = app(MovementService::class)->netExitQuantity((float) $record->quantity, (float) $adjustments);
                         if ((float) $adjustments == 0) {
                             return rtrim(rtrim(number_format($record->quantity, 4, '.', ''), '0'), '.');
                         }
@@ -289,9 +290,7 @@ class DetailsRelationManager extends RelationManager
                             $available = $realStock - $pending
                                 ->filter(fn ($d) => (int) $d->article_id === (int) $articleId)
                                 ->reject(fn ($d) => filled($d->adjusts_detail_id))
-                                ->sum(function ($d) {
-                                    return (float) $d->quantity + (float) $d->adjustments()->sum('quantity');
-                                });
+                                ->sum(fn ($d) => (float) $d->quantity);
                         }
 
                         return max(0.0, $available);

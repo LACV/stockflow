@@ -285,6 +285,12 @@ class MonthlyMovementsExcelService
                 // costo guardado en su linea en vez de $0. Los meses cerrados ya se
                 // entregaron (contabilidad/DIAN) y conservan su valor original.
                 $unit = $r['ppp'] > 0 || $monthIsClosed ? $r['ppp'] : $cost;
+
+                // Un ajuste negativo trae cantidad negativa. En un mes abierto se muestra
+                // como una salida positiva (igual que el stock, que ya usa abs()); asi
+                // inicial + compras - salidas = final. Solo cambia la presentacion: el PPP
+                // no depende de este signo. Los meses cerrados conservan su valor original.
+                $qty = $monthIsClosed ? $qty : abs($qty);
                 $total = $qty * $unit;
 
                 $r['cSal'] += $qty;

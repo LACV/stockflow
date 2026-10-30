@@ -124,4 +124,13 @@ class ExitLineTest extends TestCase
 
         $this->assertSame(7.0, (float) $a->fresh()->stock_quantity);
     }
+
+    public function test_a_return_reduces_the_net_exit_and_an_extra_removal_increases_it(): void
+    {
+        $service = app(MovementService::class);
+
+        $this->assertEquals(4.0, $service->netExitQuantity(5, 1), 'devolver 1 unidad: sale 4');
+        $this->assertEquals(6.0, $service->netExitQuantity(5, -1), 'quitar 1 mas: sale 6');
+        $this->assertEquals(5.0, $service->netExitQuantity(5, 0));
+    }
 }
