@@ -4,7 +4,9 @@ namespace App\Console\Commands;
 
 use App\Models\MonthlyClosure;
 use App\Services\MonthlyClosureService;
+use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -50,7 +52,7 @@ class LimpiarArticuloPrueba extends Command
         $txIds = $details->pluck('tx_id')->unique()->values();
 
         $affectedMonths = $details
-            ->map(fn ($d) => \Carbon\Carbon::parse($d->transaction_date))
+            ->map(fn ($d) => Carbon::parse($d->transaction_date))
             ->map(fn ($c) => ['month' => $c->month, 'year' => $c->year])
             ->unique(fn ($m) => $m['month'].'-'.$m['year'])
             ->values();
@@ -148,7 +150,7 @@ class LimpiarArticuloPrueba extends Command
         return self::SUCCESS;
     }
 
-    private function createBackup(object $article, \Illuminate\Support\Collection $txIds, \Illuminate\Support\Collection $closures): string
+    private function createBackup(object $article, Collection $txIds, Collection $closures): string
     {
         $dir = storage_path('app/backups');
         if (! is_dir($dir)) {

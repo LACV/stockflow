@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\MonthlyClosure;
 use App\Services\MonthlyClosureService;
+use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -83,7 +84,7 @@ class ReconciliarInventarioVivo extends Command
 
     private function previewChanges(MonthlyClosure $last): array
     {
-        $cutoff = \Carbon\Carbon::create($last->year, $last->month, 1)->endOfMonth()->toDateString();
+        $cutoff = Carbon::create($last->year, $last->month, 1)->endOfMonth()->toDateString();
 
         $snap = DB::table('monthly_closure_snapshots')
             ->where('monthly_closure_id', $last->id)

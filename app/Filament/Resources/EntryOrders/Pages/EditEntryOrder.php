@@ -8,10 +8,13 @@ use App\Filament\Concerns\ReopensTransaction;
 use App\Filament\Concerns\ValidatesClosedMonth;
 use App\Filament\Resources\EntryOrders\EntryOrderResource;
 use App\Models\MonthlyClosure;
+use App\Services\EntryDeletionService;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\ViewAction;
+use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
+use Illuminate\Support\HtmlString;
 use Livewire\Attributes\On;
 
 class EditEntryOrder extends EditRecord
@@ -52,7 +55,26 @@ class EditEntryOrder extends EditRecord
         }
 
         $actions[] = ViewAction::make();
-        $actions[] = DeleteAction::make();
+        $actions[] = DeleteAction::make()
+            ->modalDescription(function () {
+                $service = app(EntryDeletionService::class);
+                $plan = $service->planEntryDeletion($this->record);
+
+                return new HtmlString(nl2br(e($plan['blocked'] ?? $service->summarize($plan))));
+            })
+            ->before(function (DeleteAction $action) {
+                $plan = app(EntryDeletionService::class)->planEntryDeletion($this->record);
+
+                if ($plan['blocked'] !== null) {
+                    Notification::make()->title('No se puede eliminar')->body($plan['blocked'])->danger()->persistent()->send();
+                    $action->halt();
+                }
+            })
+            ->using(function ($record) {
+                app(EntryDeletionService::class)->deleteEntry($record);
+
+                return true;
+            });
         $actions[] = $this->getReopenAction();
 
         return $actions;

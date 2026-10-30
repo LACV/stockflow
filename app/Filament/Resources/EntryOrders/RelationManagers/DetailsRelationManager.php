@@ -6,6 +6,7 @@ use App\Filament\Resources\Articles\Schemas\ArticleForm;
 use App\Filament\Support\ArticleSearch;
 use App\Models\Article;
 use App\Models\MonthlyClosure;
+use App\Services\EntryDeletionService;
 use Carbon\Carbon;
 use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
@@ -20,6 +21,7 @@ use Filament\Schemas\Schema;
 use Filament\Tables;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
+use Illuminate\Support\HtmlString;
 
 class DetailsRelationManager extends RelationManager
 {
@@ -291,24 +293,42 @@ class DetailsRelationManager extends RelationManager
                 DeleteAction::make()
                     ->requiresConfirmation()
                     ->modalHeading('¿Eliminar artículo?')
-                    ->modalDescription('Esta acción eliminará el artículo del detalle. No se puede deshacer.')
+                    ->modalDescription(function ($record) {
+                        if (! $this->isTransactionActive()) {
+                            return 'Esta acción eliminará el artículo del detalle. No se puede deshacer.';
+                        }
+
+                        $service = app(EntryDeletionService::class);
+                        $plan = $service->planDetailDeletion($record);
+
+                        return new HtmlString(nl2br(e($plan['blocked'] ?? $service->summarize($plan))));
+                    })
                     ->modalSubmitActionLabel('Sí, eliminar')
                     ->modalCancelActionLabel('Cancelar')
-                    ->disabled(fn () => $this->isMonthClosed() || ($this->isTransactionActive() && ! $this->canEditInReopenedMonth()))
-                    ->before(function (DeleteAction $action) {
-                        if ($this->isTransactionActive() && ! $this->canEditInReopenedMonth()) {
-                            Notification::make()
-                                ->title('Factura ya guardada')
-                                ->body('Esta factura ya fue guardada. No se pueden eliminar artículos.')
-                                ->warning()
-                                ->persistent()
-                                ->send();
-                            $action->halt();
-                        }
+                    ->disabled(fn () => $this->isMonthClosed())
+                    ->before(function (DeleteAction $action, $record) {
                         if ($this->isMonthClosed()) {
                             $this->sendClosedMonthNotification();
                             $action->halt();
                         }
+
+                        if ($this->isTransactionActive()) {
+                            $plan = app(EntryDeletionService::class)->planDetailDeletion($record);
+
+                            if ($plan['blocked'] !== null) {
+                                Notification::make()->title('No se puede eliminar')->body($plan['blocked'])->danger()->persistent()->send();
+                                $action->halt();
+                            }
+                        }
+                    })
+                    ->using(function ($record) {
+                        if ($this->isTransactionActive()) {
+                            app(EntryDeletionService::class)->deleteDetail($record);
+
+                            return true;
+                        }
+
+                        return $record->delete();
                     })
                     ->after(fn ($livewire) => $livewire->dispatch('entry-detail-changed')),
             ], position: RecordActionsPosition::BeforeColumns)
