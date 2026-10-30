@@ -145,6 +145,13 @@ class EntryDeletionService
             return $result;
         }
 
+        // adjusts_detail_id es ON DELETE SET NULL: borrar la linea dejaria el ajuste huerfano.
+        if (InventoryTransactionDetail::whereIn('adjusts_detail_id', $removed->pluck('id'))->exists()) {
+            $result['blocked'] = 'Una línea de esta entrada tiene un ajuste enlazado: elimine o corrija el ajuste primero.';
+
+            return $result;
+        }
+
         // Un borrador no ha tocado stock ni costos: no hay nada que recalcular.
         if ($entry->status !== 'active') {
             return $result;

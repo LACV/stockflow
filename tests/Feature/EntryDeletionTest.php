@@ -183,4 +183,39 @@ class EntryDeletionTest extends TestCase
         $this->assertNull(InventoryTransaction::find($entry->id));
         $this->assertSame(0.0, (float) $a->fresh()->stock_quantity);
     }
+
+    public function test_entry_line_referenced_by_an_adjustment_blocks_the_deletion(): void
+    {
+        $a = $this->article('A');
+        $entry = $this->saved('entry', '2026-10-02', [[$a, 5, 100]]);
+        $line = $entry->details()->first();
+        $adjustment = InventoryTransaction::create(['type' => 'adjustment', 'status' => 'inactive', 'transaction_date' => '2026-10-04']);
+        InventoryTransactionDetail::create([
+            'inventory_transaction_id' => $adjustment->id, 'article_id' => $a->id,
+            'quantity' => -1, 'unit_cost' => 100, 'total_cost' => 100, 'adjusts_detail_id' => $line->id,
+        ]);
+
+        $plan = $this->service()->planEntryDeletion($entry);
+
+        $this->assertNotNull($plan['blocked']);
+        $this->assertStringContainsString('ajuste', $plan['blocked']);
+        $this->assertNotNull(InventoryTransaction::find($entry->id));
+    }
+
+    public function test_every_price_row_of_deleted_entry_and_exits_is_removed_but_others_stay(): void
+    {
+        $a = $this->article('A');
+        $b = $this->article('B');
+        $this->saved('entry', '2026-10-01', [[$b, 3, 10]]);
+        $entry = $this->saved('entry', '2026-10-02', [[$a, 5, 100]]);
+        $exit = $this->saved('exit', '2026-10-05', [[$a, 2, 0], [$b, 1, 0]]);
+        $this->assertSame(2, ArticlePrice::where('transaction_id', $entry->id)->count() + ArticlePrice::where('transaction_id', $exit->id)->where('article_id', $a->id)->count());
+
+        $this->service()->deleteEntry($entry);
+
+        $this->assertSame(0, ArticlePrice::where('article_id', $a->id)->count());
+        $this->assertSame(0, ArticlePrice::where('transaction_id', $entry->id)->count());
+        $this->assertSame(1, ArticlePrice::where('transaction_id', $exit->id)->where('article_id', $b->id)->count(), 'el precio de la salida del otro articulo queda');
+        $this->assertSame(1, ArticlePrice::where('article_id', $b->id)->where('source', 'ENTRY')->count());
+    }
 }
