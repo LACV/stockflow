@@ -420,4 +420,54 @@ class MonthlyMovementsExcelTest extends TestCase
         $this->assertEquals(3.0, $mov[8]);
         $this->assertEquals(0.0, $mov[11]);
     }
+
+    public function test_exit_without_stock_cover_is_valued_at_its_stored_unit_cost(): void
+    {
+        $type = Type::create(['name' => 'REPUESTOS']);
+        $article = Article::create(['name' => 'TORNILLO', 'code' => 'T-1', 'type_id' => $type->id, 'stock_quantity' => 0, 'current_average_cost' => 0, 'is_active' => true]);
+
+        $this->addDetail($this->makeTransaction('entry', '2026-10-02'), $article, 20, 1200);
+        $this->addDetail($this->makeTransaction('exit', '2026-10-03'), $article, 20, 1200);
+        $this->addDetail($this->makeTransaction('exit', '2026-10-27'), $article, 20, 1200);
+
+        $salidas = collect(app(MonthlyMovementsExcelService::class)->previewArrays(10, 2026)['salidas'])
+            ->filter(fn ($r) => ($r[0] ?? null) === 'T-1')
+            ->values();
+
+        $this->assertCount(2, $salidas);
+        $this->assertEquals(24000.0, (float) $salidas[0][4]);
+        $this->assertEquals(24000.0, (float) $salidas[1][4], 'Salida sin cobertura debe valer qty x costo guardado, no 0');
+    }
+
+    public function test_exit_with_stock_cover_still_uses_chain_ppp_not_stored_cost(): void
+    {
+        $type = Type::create(['name' => 'REPUESTOS']);
+        $article = Article::create(['name' => 'TOALLA', 'code' => 'TO-1', 'type_id' => $type->id, 'stock_quantity' => 0, 'current_average_cost' => 0, 'is_active' => true]);
+
+        $this->addDetail($this->makeTransaction('entry', '2026-10-02'), $article, 10, 100);
+        $this->addDetail($this->makeTransaction('exit', '2026-10-03'), $article, 2, 999);
+
+        $salida = collect(app(MonthlyMovementsExcelService::class)->previewArrays(10, 2026)['salidas'])
+            ->first(fn ($r) => ($r[0] ?? null) === 'TO-1');
+
+        $this->assertEquals(200.0, (float) $salida[4], 'Con cobertura se valora al PPP de la cadena');
+    }
+
+    public function test_closed_month_keeps_uncovered_exit_unchanged_because_it_was_already_delivered(): void
+    {
+        $type = Type::create(['name' => 'REPUESTOS']);
+        $article = Article::create(['name' => 'TORNILLO', 'code' => 'T-2', 'type_id' => $type->id, 'stock_quantity' => 0, 'current_average_cost' => 0, 'is_active' => true]);
+
+        $this->addDetail($this->makeTransaction('entry', '2026-10-02'), $article, 20, 1200);
+        $this->addDetail($this->makeTransaction('exit', '2026-10-03'), $article, 20, 1200);
+        $this->addDetail($this->makeTransaction('exit', '2026-10-27'), $article, 20, 1200);
+        $this->seedClosure(10, 2026, true, []);
+
+        $salidas = collect(app(MonthlyMovementsExcelService::class)->previewArrays(10, 2026)['salidas'])
+            ->filter(fn ($r) => ($r[0] ?? null) === 'T-2')
+            ->values();
+
+        $this->assertEquals(24000.0, (float) $salidas[0][4]);
+        $this->assertEquals(0.0, (float) $salidas[1][4], 'Mes cerrado ya entregado: no puede cambiar');
+    }
 }

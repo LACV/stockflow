@@ -3,9 +3,12 @@
 namespace App\Filament\Resources\DispatchOrders\Tables;
 
 use App\Filament\Support\MonthFilter;
+use App\Services\MovementService;
 use Carbon\Carbon;
+use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Notifications\Notification;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Grouping\Group;
 use Filament\Tables\Table;
@@ -82,6 +85,23 @@ class DispatchOrdersTable
             ->recordActions([
                 ViewAction::make(),
                 EditAction::make(),
+                Action::make('finalize')
+                    ->label('Guardar')
+                    ->icon('heroicon-o-check-circle')
+                    ->color('primary')
+                    ->visible(fn ($record) => $record->status === 'inactive' && $record->details()->exists())
+                    ->requiresConfirmation()
+                    ->modalHeading('¿Guardar Despacho?')
+                    ->modalDescription('Una vez guardado el despacho no podrá editar los artículos.')
+                    ->modalSubmitActionLabel('Sí, guardar')
+                    ->modalCancelActionLabel('Cancelar')
+                    ->action(function ($record) {
+                        $result = app(MovementService::class)->finalizeTransaction($record);
+
+                        $notification = Notification::make()->title($result['title'])->body($result['body']);
+                        $result['ok'] ? $notification->success() : $notification->danger()->persistent();
+                        $notification->send();
+                    }),
             ])
             ->defaultSort('id', 'desc')
             ->defaultPaginationPageOption(25)

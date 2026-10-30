@@ -6,7 +6,9 @@ use App\Models\Article;
 use App\Models\ArticlePrice;
 use App\Models\InventoryTransaction;
 use App\Models\InventoryTransactionDetail;
+use App\Models\MonthlyClosure;
 use App\Models\User;
+use Carbon\Carbon;
 use Filament\Actions\Action;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\DB;
@@ -139,6 +141,110 @@ class MovementService
                 ->where('id', $transactionId)
                 ->update(['status' => 'active']);
         }
+    }
+
+    /**
+     * Pasa un borrador a activo aplicando su efecto en stock y costo.
+     *
+     * @return array{ok: bool, title: string, body: string}
+     */
+    public function finalizeTransaction(InventoryTransaction $transaction): array
+    {
+        if ($transaction->status !== 'inactive') {
+            return ['ok' => false, 'title' => 'Ya guardado', 'body' => 'Este registro ya no es un borrador.'];
+        }
+
+        $date = Carbon::parse($transaction->transaction_date);
+        $closure = MonthlyClosure::where('month', $date->month)
+            ->where('year', $date->year)
+            ->first();
+
+        $isReopened = $closure && $closure->isReopened() && auth()->user()?->can('Reopen:MonthlyClosure');
+        $monthClosed = $closure && $closure->is_closed && ! $isReopened;
+
+        if ($monthClosed) {
+            $monthName = $date->locale('es')->isoFormat('MMMM');
+
+            return ['ok' => false, 'title' => 'Mes cerrado', 'body' => "No se puede guardar porque {$monthName} {$date->year} ya está cerrado."];
+        }
+
+        $details = $transaction->details()->get();
+
+        if ($details->isEmpty()) {
+            return ['ok' => false, 'title' => 'Sin artículos', 'body' => 'Agregue al menos un artículo antes de guardar la factura.'];
+        }
+
+        $type = strtoupper($transaction->type);
+
+        if (! $isReopened && in_array($type, ['EXIT', 'ADJUSTMENT'], true)) {
+            $insuficientes = $this->validarStockSuficiente($details, $type);
+
+            if (! empty($insuficientes)) {
+                return [
+                    'ok' => false,
+                    'title' => 'Stock insuficiente',
+                    'body' => "No se guardó la factura. Estos artículos no tienen stock suficiente:\n".implode("\n", $insuficientes),
+                ];
+            }
+        }
+
+        DB::transaction(function () use ($transaction, $details, $isReopened) {
+            foreach ($details as $detail) {
+                if ($isReopened) {
+                    [, $newAvgCost] = $this->applyMovement(
+                        $transaction->type,
+                        0,
+                        0,
+                        (float) $detail->quantity,
+                        (float) $detail->unit_cost,
+                    );
+
+                    if ($transaction->type === 'EXIT' || ($transaction->type === 'ADJUSTMENT' && (float) $detail->quantity < 0)) {
+                        $detail->unit_cost = 0;
+                    }
+
+                    if (! $detail->total_cost || $detail->total_cost == 0) {
+                        $detail->total_cost = abs((float) $detail->quantity) * (float) ($detail->unit_cost ?: 0);
+                    }
+
+                    $detail->resulting_average_cost = $newAvgCost;
+                    $detail->saveQuietly();
+                } else {
+                    $article = $detail->article;
+
+                    [$newStock, $newAvgCost, $detailUpdates] = $this->applyMovement(
+                        $transaction->type,
+                        (float) $article->stock_quantity,
+                        (float) $article->current_average_cost,
+                        (float) $detail->quantity,
+                        (float) $detail->unit_cost,
+                    );
+
+                    foreach ($detailUpdates ?? [] as $key => $value) {
+                        $detail->{$key} = $value;
+                    }
+
+                    if (! $detail->total_cost || $detail->total_cost == 0) {
+                        $detail->total_cost = abs((float) $detail->quantity) * (float) $detail->unit_cost;
+                    }
+
+                    $detail->resulting_average_cost = $newAvgCost;
+                    $detail->saveQuietly();
+
+                    $article->stock_quantity = $newStock;
+                    $article->current_average_cost = $newAvgCost;
+                    $article->saveQuietly();
+
+                    $this->createPriceRecord($article, $detail, $transaction->type, $transaction->transaction_date);
+                    $this->notifyIfStockCritical($article, $newStock);
+                }
+            }
+
+            $transaction->status = 'active';
+            $transaction->saveQuietly();
+        });
+
+        return ['ok' => true, 'title' => 'Registro guardado', 'body' => 'El registro fue guardado exitosamente. Ya no es posible editarlo.'];
     }
 
     public function syncTransactionStatus(?InventoryTransactionDetail $detail): void

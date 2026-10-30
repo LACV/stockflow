@@ -116,6 +116,26 @@ class MonthlyMovementsExcelService
         ]]);
     }
 
+    /**
+     * Borradores del mes con lineas: no cuentan en entradas/salidas hasta guardarse.
+     *
+     * @return array{count: int, value: float}
+     */
+    public function draftSummary(int $month, int $year): array
+    {
+        $start = Carbon::create($year, $month, 1)->startOfMonth()->toDateString();
+        $end = Carbon::create($year, $month, 1)->endOfMonth()->toDateString();
+
+        $row = DB::table('inventory_transactions as t')
+            ->join('inventory_transaction_details as d', 'd.inventory_transaction_id', '=', 't.id')
+            ->where('t.status', 'inactive')
+            ->whereBetween('t.transaction_date', [$start, $end])
+            ->selectRaw('count(distinct t.id) as n, coalesce(sum(d.total_cost), 0) as v')
+            ->first();
+
+        return ['count' => (int) $row->n, 'value' => (float) $row->v];
+    }
+
     public const PREVIEW_CACHE_TTL_CLOSED = 86400;
 
     public const PREVIEW_CACHE_TTL_OPEN = 300;
@@ -152,6 +172,12 @@ class MonthlyMovementsExcelService
         $monthStart = Carbon::create($year, $month, 1)->startOfMonth()->toDateString();
         $monthEnd = Carbon::create($year, $month, 1)->endOfMonth()->toDateString();
         $monthLabel = Carbon::create($year, $month, 1)->format('F');
+
+        $monthIsClosed = MonthlyClosure::query()
+            ->where('month', $month)
+            ->where('year', $year)
+            ->where('is_closed', true)
+            ->exists();
 
         $prevMonth = Carbon::create($year, $month, 1)->subMonth();
         $selSnap = $this->monthSnapshot($month, $year);
@@ -255,7 +281,10 @@ class MonthlyMovementsExcelService
                 // Las salidas se valoran al PPP vigente de la cadena (mismo metodo que
                 // genera los snapshots), para que INI + COMPRA - SALIDA sea coherente
                 // con el FINAL del snapshot.
-                $unit = $r['ppp'];
+                // Mes abierto: una salida sin cobertura en la cadena (sin PPP) se valora al
+                // costo guardado en su linea en vez de $0. Los meses cerrados ya se
+                // entregaron (contabilidad/DIAN) y conservan su valor original.
+                $unit = $r['ppp'] > 0 || $monthIsClosed ? $r['ppp'] : $cost;
                 $total = $qty * $unit;
 
                 $r['cSal'] += $qty;

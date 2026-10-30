@@ -61,6 +61,10 @@ class PreviewExcelPage extends Page implements Tables\Contracts\HasTable
 
     public bool $isOpenMonth = false;
 
+    public int $draftCount = 0;
+
+    public float $draftValue = 0;
+
     public string $lastRefresh = '';
 
     public float $entradasGrandTotal = 0;
@@ -106,6 +110,10 @@ class PreviewExcelPage extends Page implements Tables\Contracts\HasTable
         $this->memoData = null;
 
         $data = $this->cachedData();
+
+        $drafts = $this->isOpenMonth ? app(MonthlyMovementsExcelService::class)->draftSummary($this->record->month, $this->record->year) : ['count' => 0, 'value' => 0.0];
+        $this->draftCount = $drafts['count'];
+        $this->draftValue = $drafts['value'];
 
         $this->entradasHeaders = $data['entradasHeaders'];
         $this->salidasHeaders = $data['salidasHeaders'];

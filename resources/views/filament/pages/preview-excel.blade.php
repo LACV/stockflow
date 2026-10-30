@@ -76,6 +76,13 @@
             @endif
         </div>
 
+        @if($this->isOpenMonth && $this->draftCount > 0)
+            <div class="mb-2 text-sm" style="border:1px solid rgb(245 158 11 / 0.5); background: rgb(245 158 11 / 0.12); color: rgb(245 158 11); border-radius: 0.5rem; padding: 0.5rem 1rem;">
+                <strong>Mes abierto:</strong> hay {{ $this->draftCount }} {{ $this->draftCount === 1 ? 'despacho o entrada' : 'despachos o entradas' }} sin guardar (borrador) por ${{ number_format($this->draftValue, 2, '.', ',') }}.
+                Todavía no cuentan en Entradas, Salidas ni en el inventario final; entran al guardarlos o al cerrar el mes.
+            </div>
+        @endif
+
         {{ $this->content }}
 
         <div class="excel-scroll-wrap mt-1 flex-1 min-h-0 overflow-auto shadow-lg shadow-gray-200/50 dark:shadow-none">
